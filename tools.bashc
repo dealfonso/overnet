@@ -1,0 +1,200 @@
+function createvxlan() {
+        local VNI=
+        while bashc.parameters_next; do
+                PARAM="$(bashc.parameters_current)"
+                case "$PARAM" in
+                        *)      [ "$VNI" != "" ] && createvxlan_help && bashc.finalize 1
+                                VNI="$PARAM"
+                                ( ! bashc.is_int "$VNI" || [ $VNI -lt 0 -o $VNI -gt 4096 ] ) && bashc.finalize 1 "the VNI must be an integer between 0 and 4096"
+                                ;;
+                esac
+        done
+
+        if [ "$VNI" == "" ]; then
+                # Need to get a random VNI
+                VNI=$((RANDOM%4095+1))
+        fi
+
+        p_debug "using VNI $VNI"
+        setnames $VNI
+
+        trap bashc.execundo ERR
+        ip netns add $VXLAN_NS &&
+        bashc.undo ip netns del $VXLAN_NS &&
+        ip link add "$VXLAN_DEV" type vxlan id $VNI group $VXLAN_UDP_GROUP dstport 0 dev $PHYSDEV &&
+        bashc.undo ip link del dev $VXLAN_DEV &&
+        ip link set "$VXLAN_DEV" netns $VXLAN_NS &&
+        exec_ns_undo $VXLAN_NS ip link set $VXLAN_DEV netns 1 &&
+        exec_ns $VXLAN_NS ip link add "$VXLAN_BR" type bridge &&
+        exec_ns_undo $VXLAN_NS ip link del $VXLAN_BR &&
+        exec_ns $VXLAN_NS ip link set "$VXLAN_DEV" master "$VXLAN_BR" &&
+        exec_ns_undo $VXLAN_NS ip link set "$VXLAN_DEV" nomaster &&
+        exec_ns $VXLAN_NS ip link set "$VXLAN_DEV" up &&
+        exec_ns_undo $VXLAN_NS ip link set $VXLAN_DEV down &&
+        exec_ns $VXLAN_NS ip link set "$VXLAN_BR" up &&
+        exec_ns_undo $VXLAN_NS ip link set $VXLAN_BR down
+        trap - ERR
+}
+
+function getdevparam() {
+        set -o pipefail
+        local IFINFO
+        if [ "$3" == "" ]; then
+                IFINFO="$(ip link show $1 | head -n 1)" || return 1
+        else
+                IFINFO="$(ip netns exec $3 ip link show $1 | head -n 1)" || return 1
+        fi
+        set +o pipefail
+        IFS=':' read ID DEVNAME REST < <(echo $IFINFO)
+        local C_VALUE C_PARAM n
+        local PARAMS="${REST//<*>/}"
+        PARAMS=( $PARAMS )
+        for ((n=0;n<${#PARAMS[@]};n++)); do
+          C_PARAM="${PARAMS[$n]}"
+          n=$((n+1))
+          C_VALUE="${PARAMS[$n]}"
+          if [ "$C_PARAM" == "$2" ]; then
+            echo $C_VALUE
+            break
+          fi
+        done
+        return 0
+}
+
+function getveth() {
+        local VNI=
+        local VETH_NAME=
+        local MTU=
+        while bashc.parameters_next; do
+                PARAM="$(bashc.parameters_current)"
+                case "$PARAM" in
+                        --name|-n)
+                                bashc.parameters_next
+                                VETH_NAME="$(bashc.parameters_current)"
+                                ;;
+                        --mtu|-m)
+                                bashc.parameters_next
+                                MTU="$(bashc.parameters_current)"
+                                ! bashc.is_int "$MTU" && bashc.finalize 1 "incorrect format for MTU"
+                                ;;
+
+                        *)      [ "$VNI" != "" ] && createvxlan_help && bashc.finalize 1
+                                VNI="$PARAM"
+                                ( ! bashc.is_int "$VNI" || [ $VNI -lt 0 -o $VNI -gt 4096 ] ) && bashc.finalize 1 "the VNI must be an integer between 0 and 4096"
+                                ;;
+                esac
+        done
+
+        [ "$VNI" == "" ] && bashc.finalize 1 "missing VNI"
+        if [ "$VETH_NAME" == "" ]; then
+                VETH_NAME=veth$((RANDOM%4096))
+        fi
+        VETH_NAME="${VETH_NAME// /}.$VNI"
+        local VETH_NAME_1="${VETH_NAME}-1"
+        local VETH_NAME_2="${VETH_NAME}-2"
+
+        p_debug "creating veth $VETH_NAME for $VNI"
+        setnames $VNI
+
+        if [ "$MTU" == "" ]; then
+                local D_MTU
+                if D_MTU="$(getdevparam $VXLAN_BR mtu $VXLAN_NS)"; then
+                        MTU="$D_MTU"
+                        p_debug "guessed MTU is $D_MTU"
+                else
+                        bashc.finalize 1 "could not get MTU from $VXLAN_BR in $VXLAN_NS"
+                fi
+        fi
+
+        trap bashc.execundo ERR
+        ip link add $VETH_NAME_1 mtu $MTU type veth peer name $VETH_NAME_2 mtu $MTU &&
+        bashc.undo ip link del $VETH_NAME_1 &&
+        ip link set $VETH_NAME_2 netns $VXLAN_NS &&
+        exec_ns_undo $VXLAN_NS ip link set $VETH_NAME_2 netns 1 &&
+        exec_ns $VXLAN_NS ip link set $VETH_NAME_2 master $VXLAN_BR &&
+        exec_ns_undo $VXLAN_NS ip link set $VETH_NAME_2 nomaster &&
+        exec_ns $VXLAN_NS ip link set $VETH_NAME_2 up &&
+        exec_ns_undo $VXLAN_NS ip link set $VETH_NAME_2 down &&
+        ip link set $VETH_NAME_1 up &&
+        bashc.undo ip link set $VETH_NAME_1 down
+        trap - ERR
+
+        p_out "$VETH_NAME_1"
+}
+
+PHYSDEV=ens3
+function setnames() {
+        local VNI="$1"
+        VXLAN_DEV=vxlan${VNI}
+        VXLAN_BR=br-${VXLAN_DEV}
+        VXLAN_NS=ns-${VXLAN_DEV}
+        VXLAN_UDP_GROUP=239.1.1.$((VNI%16+1))
+
+        bashc.dump_vars VXLAN_DEV VXLAN_BR VXLAN_NS VXLAN_UDP_GROUP
+}
+
+function exec_ns() {
+        local NS="$1"
+        shift
+        ip netns exec $NS "$@"
+}
+function exec_ns_undo() {
+        local NS="$1"
+        shift
+        bashc.undo ip netns exec $NS "$@"
+}
+
+SUBNET=192.168.1.10/24
+
+function gen_ips() {
+    local SUBNET="$1"
+    local IP=${SUBNET%/*}
+    local MASK=${SUBNET#*/}
+    local FIXEDMASK=$((0xffffffff << (32-MASK) & 0xffffffff))
+    local VARMASK=$((0xffffffff - FIXEDMASK))
+    local FIXEDPART=$(ip2mask $IP)
+    local FIRST=$((FIXEDPART & VARMASK))
+    FIXEDPART=$((FIXEDPART & FIXEDMASK))
+
+    local CURRENT=FIRST
+    for ((CURRENT=FIRST; CURRENT<VARMASK; CURRENT=CURRENT + 1 & VARMASK)); do
+        if (((CURRENT & 0xff) == 0)); then
+            continue
+        fi
+        if (((CURRENT & 0xff) == 0xff)); then
+            continue
+        fi
+        mask2ip $((FIXEDPART+CURRENT))
+    done
+}
+
+function ip2mask() {
+    local SUBNET="$1"
+    local IP=${SUBNET%/*}
+    local IP1 IP2 IP3 IP4
+    IFS='.' read IP1 IP2 IP3 IP4 <<< "$IP"
+    printf "0x%02x%02x%02x%02x\n" $IP1 $IP2 $IP3 $IP4
+}
+
+function ip2genmask() {
+    local SUBNET="$1"
+    local IP=${SUBNET%/*}
+    local MASK=${SUBNET#*/}
+    local GENMASK=$((0xffffffff - (0xffffffff << (32-MASK) & 0xffffffff)))
+    printf "0x%0x\n" $GENMASK 
+}
+
+function mask2ip() {
+    local MASK="$1"
+    local IP4=$((MASK&0xff))
+    local IP3=$(((MASK>>8)&0xff))
+    local IP2=$((MASK>>16&0xff))
+    local IP1=$((MASK>>24&0xff))
+    printf "%d.%d.%d.%d\n" $IP1 $IP2 $IP3 $IP4
+}
+
+#gen_ips 192.168.1.10/24
+#
+#mask2ip "0xc0a80101"
+#
+#ip2genmask "192.168.1.1/24"

@@ -1,0 +1,15 @@
+PACKAGE=overnet
+VERSION=0.0-0
+SUMMARY="overnet - generated using bashcgen"
+LICENSE="Apache 2.0"
+DESCRIPTION="overnet - generated using bashcgen"
+PACKAGER=""
+# DEPENDS is for DEB packages
+DEPENDS="bash, tar, coreutils, gettext-base, gawk, sed"
+# REQUIRES is for RPM packages
+REQUIRES="bash tar coreutils gawk gettext"
+
+/usr/share/$PACKAGE/;lib:version:LICENSE
+/etc/$PACKAGE/;etc/*
+;overnet;bashc -o $TMPDIR/$FILENAME -cCS $SOURCEFOLDER/$FILENAME;chmod +x $TMPDIR/$FILENAME
+/usr/bin/;$TMPDIR/overnet
