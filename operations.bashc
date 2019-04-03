@@ -1,18 +1,5 @@
-function read_nextparameter() {
-  local VARNAME="$1"
-  bashc.parameters_next
-  read "$VARNAME" <<< "$(bashc.parameters_current)"
-}
-
-function bashc.line_count() {
-  local n=0
-  if [ "$1" != "" ]; then
-    while read; do
-      n=$((n+1))
-    done <<< "$1"
-  fi
-  echo $n
-}
+source lib/bashcfuncs.bashc 
+source iputils.bashc
 
 function ensure_int() {
   local VARNAME="$1"
@@ -42,96 +29,9 @@ function ensure_simplestr() {
   fi
 }
 
-function bashc.is_cidr() {
-  local CIDR="${1#*/}"
-  if ! bashc.is_int "$CIDR"; then
-    return 1
-  fi
-  local IP="${1%/*}"
-  if ! bashc.is_ip "$IP"; then
-    return 1
-  fi
-  return 0
-}
-
-function find_iface_property() {
-  local IFACE_DATA=
-  if [ "$2" == "" ]; then
-    IFACE_DATA="$(ip -d addr show 2> /dev/null)"
-  else
-    IFACE_DATA="$(ip -d addr show "$2" 2> /dev/null)"
-    [ $? -ne 0 ] && p_error "interface $2 does not exist" && return 1
-  fi
-
-  local RETVAL=1
-  local IFACE_ID IFACE_NAME IFACE_PARAMS n C_PARAM C_VALUE SECTION
-  while read; do
-    SECTION=
-    if [[ "$REPLY" =~ ^[0-9]+: ]]; then
-      IFS=':' read IFACE_ID IFACE_NAME REST <<< "$REPLY"
-      IFACE_PARAMS="${REST//<*>/}"
-      IFACE_NAME="$(bashc.trim "$IFACE_NAME")"
-      p_debug "found interface $IFACE_ID -> $IFACE_NAME"
-    else
-      IFACE_PARAMS="$REPLY"
-    fi
-    
-    [ "$IFACE_NAME" == "lo" ] && continue
-
-    IFACE_PARAMS=( $IFACE_PARAMS )
-    for ((n=0;n<${#IFACE_PARAMS[@]};n++)); do
-      C_PARAM="${IFACE_PARAMS[$n]}"
-      case "$C_PARAM" in
-        veth|bridge_slave|vxlan)  SECTION="$C_PARAM"
-                                  continue;;
-        $IFACE_NAME)              continue;;
-      esac
-      n=$((n+1))
-      C_VALUE="${IFACE_PARAMS[$n]}"
-      # p_debug "$IFACE_NAME: $C_PARAM -> $C_VALUE"
-      # TODO: incluir tambien el filtro por seccion (si hay un $3, si no coincide, no vale )
-      if [ "$C_PARAM" == "$1" ]; then
-        echo "$IFACE_NAME $(bashc.trim "${C_VALUE}")"
-        RETVAL=0
-      fi
-    done
-  done <<< "$IFACE_DATA"
-  return $RETVAL
-}
-
-function find_iface_by_property() {
-  local ALL_IFACES="$(ip -d a 2> /dev/null)"
-  local IFACE_ID IFACE_NAME IFACE_PARAMS n C_PARAM C_VALUE
-  local RETVAL=1
-  local SECTION
-  while read; do
-    SECTION=
-    if [[ "$REPLY" =~ ^[0-9]+: ]]; then
-      IFS=':' read IFACE_ID IFACE_NAME REST <<< "$REPLY"
-      IFACE_PARAMS="${REST//<*>/}"
-      IFACE_NAME="$(bashc.trim "$IFACE_NAME")"
-      p_debug "found interface $IFACE_ID -> $IFACE_NAME"
-    else
-      IFACE_PARAMS="$REPLY"
-    fi
-    IFACE_PARAMS=( $IFACE_PARAMS )
-    for ((n=0;n<${#IFACE_PARAMS[@]};n++)); do
-      C_PARAM="${IFACE_PARAMS[$n]}"
-      case "$C_PARAM" in
-        veth|bridge_slave|vxlan)  SECTION="$C_PARAM"
-                                  continue;;
-        $IFACE_NAME)              continue;;
-      esac
-      n=$((n+1))
-      C_VALUE="${IFACE_PARAMS[$n]}"
-      # p_debug "$IFACE_NAME: $C_PARAM -> $C_VALUE"
-      if [ "$C_PARAM" == "$1" -a "$C_VALUE" == "$2" ]; then
-        echo "$(bashc.trim "${IFACE_NAME}")"
-        RETVAL=0
-      fi
-    done
-  done <<< "$ALL_IFACES"
-  return $RETVAL
+function test() {
+  find_iface_property -n vxlan100 vxlan:id
+  find_iface_property -n vxlan100 id
 }
 
 function createvxlan() {
@@ -144,13 +44,12 @@ function createvxlan() {
   while bashc.parameters_next; do
     PARAM="$(bashc.parameters_current)"
     case "$PARAM" in
-      --namespace|-n) read_nextparameter NAMESPACE;;
       --delete-namespace|-d)
                       DELETE_NAMESPACE=true;;
-      --local-ip|-l)  read_nextparameter LOCALIP;;
-      --interface|-i) read_nextparameter IFACE_NAME;;
+      --local-ip|-l)  bashc.read_nextparameter LOCALIP;;
+      --interface|-i) bashc.read_nextparameter IFACE_NAME;;
       --multicast|-m) 
-                      read_nextparameter MULTICAST_GROUP;;
+                      bashc.read_nextparameter MULTICAST_GROUP;;
       --first-interface|-f)
                       USEFIRST=true;;
       *)              [ "$VNI" == "" ] || (usage && bashc.finalize 1 "invalid parameter $PARAM")
@@ -174,10 +73,9 @@ function createvxlan() {
 
   local GUESSED_IP=
   if [ "$IFACE_NAME" != "" ]; then
-    GUESSED_IP="$(find_iface_property inet "$IFACE_NAME")"
+    GUESSED_IP="$(find_iface_property "$IFACE_NAME" inet)"
     [ $? -ne 0 ] && bashc.finalize 1 "$IFACE_NAME is not a valid interface"
     [ $(bashc.line_count "$GUESSED_IP") -ne 1 ] && bashc.finalize 1 "could not guess the IP for interface $IFACE_NAME"
-    read _ GUESSED_IP <<< "$GUESSED_IP"
     p_debug "guessed ip $GUESSED_IP for interface $IFACE_NAME"
 
     if [ "$LOCALIP" != "" -a "$LOCALIP" != "$GUESSED_IP" ]; then
@@ -189,36 +87,11 @@ function createvxlan() {
   LOCALIP="${LOCALIP:-$GUESSED_IP}"
 
   if [ "$LOCALIP" == "" -a "$IFACE_NAME" == "" ]; then
-    GUESSED_IP="$(find_iface_property inet "$IFACE_NAME")"
+    GUESSED_IP="$(find_iface_property inet)"
     [ $? -ne 0 ] && bashc.finalize 1 "could not find any iface to create the vxlan"
     [ "$USEFIRST" != "true" -a $(bashc.line_count "$GUESSED_IP") -ne 1 ] && bashc.finalize 1 "there are multiple interfaces. Please select which one"
     read IFACE_NAME LOCALIP <<< "$GUESSED_IP"
   fi
-
-  local NS_PREFIX=()
-  if [ "$NAMESPACE" != "" ]; then
-    ensure_simplestr "$NAMESPACE" "the name $NAMESPACE is not valid for a namespace"
-    ip netns exec "$NAMESPACE" sh -c "" > /dev/null 2> /dev/null
-    if [ $? -eq 0 ]; then
-      if [ "$DELETE_NAMESPACE" == "true" ]; then
-        p_debug "deleting namespace $NAMESPACE"
-        ip netns delete "$NAMESPACE"
-      else
-        bashc.finalize 1 "namespace $NAMESPACE already exists"
-      fi
-    fi
-    NS_PREFIX=( "ip" "netns" "exec" "$NAMESPACE" )
-    ip netns add "$NAMESPACE"
-    ip netns exec "$NAMESPACE" ip link set lo up
-  fi
-
-  local VXIFACE=vxlan${VNI}
-  local BRNAME=br${VXIFACE}
-
-  local CIDR="${LOCALIP#*/}"
-  local IP="${LOCALIP%/*}"
-
-  bashc.dump_vars VNI LOCALIP IFACE_NAME NAMESPACE
 
   if [ "$MULTICAST_GROUP" == "-" ]; then
     MULTICAST_GROUP=239.1.1.$((VNI%10+1))
@@ -228,19 +101,37 @@ function createvxlan() {
     ensure_ip MULTICAST_GROUP "the multicast group is not an IP address (use - to guess it)"
   fi
 
-  NAMESPACE=${NAMESPACE:-1}
-set -x
+  local CIDR="${LOCALIP#*/}"
+  local IP="${LOCALIP%/*}"
+  local VXIFACE VXBRNAME VXNAMESPACE
+  set_vni_vars "$VNI"
 
+  # If the na
+  exec_ns "$VXNAMESPACE" sh -c "" > /dev/null 2> /dev/null
+  if [ $? -eq 0 ]; then
+    if [ "$DELETE_NAMESPACE" == "true" ]; then
+      p_debug "deleting namespace $VXNAMESPACE"
+      ip netns delete "$VXNAMESPACE"
+    else
+      bashc.finalize 1 "namespace $VXNAMESPACE already exists"
+    fi
+  fi
+
+  # We'll create the namespace
+  ip netns add "$VXNAMESPACE"
+  exec_ns "$VXNAMESPACE" ip link set lo up
+
+set -x
   if [ "$MULTICAST_GROUP" == "" ]; then
     ip link add $VXIFACE type vxlan id $VNI dstport 0 local $IP
   else
     ip link add $VXIFACE type vxlan id $VNI dstport 0 dev $IFACE_NAME group $MULTICAST_GROUP
-  fi
-  ip link set dev $VXIFACE netns $NAMESPACE
-  "${NS_PREFIX[@]}" ip link add $BRNAME type bridge
-  "${NS_PREFIX[@]}" ip link set dev $VXIFACE master $BRNAME
-  "${NS_PREFIX[@]}" ip link set dev $BRNAME up
-  "${NS_PREFIX[@]}" ip link set dev $VXIFACE up
+  fi &&
+  ip link set dev $VXIFACE netns $VXNAMESPACE &&
+  exec_ns "$VXNAMESPACE" ip link add $VXBRNAME type bridge &&
+  exec_ns "$VXNAMESPACE" ip link set dev $VXIFACE master $VXBRNAME &&
+  exec_ns "$VXNAMESPACE" ip link set dev $VXBRNAME up &&
+  exec_ns "$VXNAMESPACE" ip link set dev $VXIFACE up
 set +x
 
   bashc.finalize 0 
@@ -258,6 +149,73 @@ COMMENT
   p_error "not implemented"
 }
 
+function addiface() {
+  local DEST_NAMESPACE CREATE_NAMESPACE IP BRIDGE
+  while bashc.parameters_next; do
+    PARAM="$(bashc.parameters_current)"
+    case "$PARAM" in
+      --bridge|-b)    BRIDGE=true;;
+      --ip|-i)        bashc.read_nextparameter IP;;
+      --namespace|-n) bashc.read_nextparameter DEST_NAMESPACE;;
+      --create|-c)    CREATE_NAMESPACE=true;;
+      *)              [ "$VNI" == "" ] || (usage && bashc.finalize 1 "invalid parameter $PARAM")
+                      VNI="$PARAM";;
+    esac
+  done
+
+  [ "$IP" != "" ] && ensure_cidr IP "the IP address must be in CIDR format"
+  ensure_int VNI "the VLAN network identifier is mandatory and must be integer"
+
+  local CIDR="${IP#*/}"
+  local VXIFACE VXBRNAME VXNAMESPACE
+  set_vni_vars "$VNI"
+  verify_vxlan_structure "$VNI"
+
+  if [ "$DEST_NAMESPACE" != "" ]; then
+    ensure_simplestr DEST_NAMESPACE "$DEST_NAMESPACE is not a valid name for a namespace"
+    ip netns exec "$DEST_NAMESPACE" sh -c "" > /dev/null 2> /dev/null
+    if [ $? -ne 0 ]; then
+      if [ "$CREATE_NAMESPACE" == "true" ]; then
+        ip netns add "$DEST_NAMESPACE" &&
+        ip netns exec "$DEST_NAMESPACE" ip link set dev lo up
+      else
+        bashc.finalize 1 "namespace $DEST_NAMESPACE does not exist"
+      fi
+    fi
+  fi
+
+  local VETH_1 VETH_2
+  VETH_2="$(find_device_name "$VXNAMESPACE" "veth" "-2")" || 
+    bashc.finalize 1 "could not find a interface name"
+  VETH_1="${VETH_2::-2}-1"
+
+  p_debug "using interface names $VETH_1 - $VETH_2"
+
+  local BRNAME
+  if [ "$BRIDGE" == "true" ]; then
+    BRNAME="$(find_device_name "$DEST_NAMESPACE" "br")" || 
+      bashc.finalize 1 "could not find a name for the bridge"
+  fi
+
+  set -x
+  ip link add $VETH_1 mtu 1450 type veth peer name $VETH_2 mtu 1450 &&
+  ip link set dev $VETH_2 netns $VXNAMESPACE &&
+  exec_ns "$VXNAMESPACE" ip link set dev $VETH_2 master $VXBRNAME up &&
+  if [ "$DEST_NAMESPACE" != "" ]; then
+    ip link set dev $VETH_1 netns $DEST_NAMESPACE
+  fi
+  exec_ns "$DEST_NAMESPACE" ip link set dev $VETH_1 up
+  if [ "$BRIDGE" == "true" ]; then
+    exec_ns "$DEST_NAMESPACE" ip link add "$BRNAME" type bridge
+    exec_ns "$DEST_NAMESPACE" ip link set dev "$BRNAME" up
+    exec_ns "$DEST_NAMESPACE" ip link set dev "$VETH_1" master "$BRNAME"
+  fi
+  if [ "$IP" != "" ]; then
+    exec_ns "$DEST_NAMESPACE" ip addr add $IP dev $VETH_1
+  fi
+  set +x
+}
+
 function deletevxlan() {
   while bashc.parameters_next; do
     PARAM="$(bashc.parameters_current)"
@@ -268,26 +226,82 @@ function deletevxlan() {
   p_error "not implemented"
 }
 
-function addip() {
-  while bashc.parameters_next; do
-    PARAM="$(bashc.parameters_current)"
-    case "$PARAM" in
-      --remote|-r)          bashc.parameters_next
-                            REMOTE="$(bashc.parameters_current)";;
-      *)                    usage && bashc.finalize 1 "invalid parameter $PARAM";;
-    esac
-  done
-  p_error "not implemented"
+function set_vni_vars() {
+  local VNI="$1"
+  VXIFACE=vxlan${VNI}
+  VXBRNAME=br${VXIFACE}
+  VXNAMESPACE="vxlan${VNI}"
 }
 
-function removeip() {
+function addhost() {
+  local IP
   while bashc.parameters_next; do
     PARAM="$(bashc.parameters_current)"
     case "$PARAM" in
-      --remote|-r)          bashc.parameters_next
-                            REMOTE="$(bashc.parameters_current)";;
-      *)                    usage && bashc.finalize 1 "invalid parameter $PARAM";;
+      --ip|-i)        bashc.read_nextparameter IP;;
+      *)              [ "$VNI" == "" ] || (usage && bashc.finalize 1 "invalid parameter $PARAM")
+                      VNI="$PARAM";;
     esac
   done
-  p_error "not implemented"
+
+  [ "$IP" != "" ] && ensure_cidr IP "the IP address must be in CIDR format"
+
+  local CIDR="${IP#*/}"
+  local IP="${IP%/*}"
+
+  local VXIFACE VXBRNAME VXNAMESPACE
+  set_vni_vars "$VNI"
+
+  verify_vxlan_structure "$VNI" || bashc.finalize 1 "could not verify the vxlan structure"
+
+  local UDPGROUP
+  UDPGROUP="$(find_iface_property -n "$VXNAMESPACE" "$VXIFACE" "vxlan:group")"
+  [ "$UDPGROUP" != "" ] && bashc.finalize 1 "this vxlan is multicast based"
+
+set -x
+  exec_ns "$VXNAMESPACE" bridge fdb add 00:00:00:00:00:00 dst $IP dev $VXIFACE self permanent static
+set +x
+  return 0
+}
+
+function rmhost() {
+  local IP ALLIPS
+  while bashc.parameters_next; do
+    PARAM="$(bashc.parameters_current)"
+    case "$PARAM" in
+      --ip|-i)        bashc.read_nextparameter IP;;
+      --all|-a)       ALLIPS=true;;
+      *)              [ "$VNI" == "" ] || (usage && bashc.finalize 1 "invalid parameter $PARAM")
+                      VNI="$PARAM";;
+    esac
+  done
+
+  [ "$IP" != "" ] && ensure_cidr IP "the IP address must be in CIDR format"
+
+  local CIDR="${IP#*/}"
+  local IP="${IP%/*}"
+  local VXIFACE VXBRNAME VXNAMESPACE
+  set_vni_vars "$VNI"
+
+  verify_vxlan_structure "$VNI" || bashc.finalize 1 "could not verify the vxlan structure"
+
+  local UDPGROUP
+  UDPGROUP="$(find_iface_property -n "$VXNAMESPACE" "$VXIFACE" "vxlan:group")"
+  [ "$UDPGROUP" != "" ] && bashc.finalize 1 "this vxlan is multicast based"
+
+  if [ "$ALLIPS" == "true" ]; then
+    local DSTIP
+    local RMIPS=()
+    while read; do
+      read _ _ DSTIP _ <<< "$REPLY"
+      p_debug "to remove $DSTIP"
+      bashc.is_ip "$DSTIP" && RMIPS=( "${RMIPS[@]}" $DSTIP)
+    done <<< "$(exec_ns "$VXNAMESPACE" bridge fdb show brport "$VXIFACE" | grep '^00:00:00:00:00:00')"
+  else
+    set -x
+    exec_ns "$VXNAMESPACE" bridge fdb del 00:00:00:00:00:00 dst $IP dev $VXIFACE 2> /dev/null
+    ERR=$?
+    set +x
+  fi
+  return 0
 }

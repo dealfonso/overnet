@@ -1,0 +1,162 @@
+function find_device_name() {
+  local NAME n
+  local NAMESPACE="$1"
+  local PREFIX="$2"
+  local SUFFIX="$3"
+  for ((n=0;n<100;n++)); do
+    NAME="${PREFIX}-${n}${SUFFIX}"
+    exec_ns "$NAMESPACE" ip link show $NAME > /dev/null 2> /dev/null
+    if [ $? -ne 0 ]; then
+      echo "$NAME"
+      return 0
+    fi
+  done
+  p_error "could not find a interface name"
+  return 1
+}
+
+function find_iface_property() {
+  local NS_PREFIX=()
+  if [ "$1" == "-n" ]; then
+    shift
+    NS_PREFIX=(ip netns exec "$1")
+    shift
+  fi
+  local S_PARAM S_SECTION S_IFACE
+  local IFACE_DATA=
+  if [ "$2" == "" ]; then
+    S_PARAM="$1"
+    IFACE_DATA="$("${NS_PREFIX[@]}" ip -d addr show 2> /dev/null)"
+  else
+    S_PARAM="$2"
+    S_IFACE="$1"
+    IFACE_DATA="$("${NS_PREFIX[@]}" ip -d addr show "$S_IFACE" 2> /dev/null)"
+    [ $? -ne 0 ] && p_error "interface $1 does not exist" && return 1
+  fi
+
+  local RETVAL=1
+  local IFACE_ID IFACE_NAME IFACE_PARAMS n C_PARAM C_VALUE SECTION
+
+  IFS=":" read S_SECTION S_PARAM <<< "$S_PARAM"
+  [ "$S_PARAM" == "" ] && S_PARAM="$S_SECTION" && S_SECTION=
+
+  while read; do
+    SECTION=
+    if [[ "$REPLY" =~ ^[0-9]+: ]]; then
+      IFS=':' read IFACE_ID IFACE_NAME REST <<< "$REPLY"
+      IFACE_PARAMS="${REST//<*>/}"
+      IFACE_NAME="$(bashc.trim "$IFACE_NAME")"
+      p_debug "found interface $IFACE_ID -> $IFACE_NAME"
+    else
+      IFACE_PARAMS="$REPLY"
+    fi
+    
+    [ "$IFACE_NAME" == "lo" ] && continue
+
+    IFACE_PARAMS=( $IFACE_PARAMS )
+    for ((n=0;n<${#IFACE_PARAMS[@]};n++)); do
+      C_PARAM="${IFACE_PARAMS[$n]}"
+      case "$C_PARAM" in
+        veth|bridge_slave|vxlan|bridge)  
+                                  SECTION="$C_PARAM"
+                                  continue;;
+        $IFACE_NAME)              continue;;
+      esac
+
+      if [ "$S_SECTION" != "" -a "$S_SECTION" != "$SECTION" ]; then
+        break
+      fi
+
+      n=$((n+1))
+      C_VALUE="${IFACE_PARAMS[$n]}"
+      # p_debug "$IFACE_NAME: $C_PARAM -> $C_VALUE"
+      # TODO: incluir tambien el filtro por seccion (si hay un $3, si no coincide, no vale )
+      if [ "$C_PARAM" == "$S_PARAM" ]; then
+        if [ "$S_IFACE" == "" ]; then
+          echo "$IFACE_NAME $(bashc.trim "${C_VALUE}")"
+        else
+          echo "$(bashc.trim "${C_VALUE}")"
+        fi
+        RETVAL=0
+      fi
+    done
+  done <<< "$IFACE_DATA"
+  return $RETVAL
+}
+
+function find_iface_by_property() {
+  local NS_PREFIX=()
+  if [ "$1" == "-n" ]; then
+    shift
+    NS_PREFIX=(ip netns exec "$1")
+    shift
+  fi
+
+  local ALL_IFACES="$("${NS_PREFIX[@]}" ip -d a 2> /dev/null)"
+  local IFACE_ID IFACE_NAME IFACE_PARAMS n C_PARAM C_VALUE
+  local RETVAL=1
+  local SECTION
+
+  local S_PARAM S_SECTION
+  IFS=":" read S_SECTION S_PARAM <<< "$1"
+  [ "$S_PARAM" == "" ] && S_PARAM="$S_SECTION" && S_SECTION=
+
+  while read; do
+    SECTION=
+    if [[ "$REPLY" =~ ^[0-9]+: ]]; then
+      IFS=':' read IFACE_ID IFACE_NAME REST <<< "$REPLY"
+      IFACE_PARAMS="${REST//<*>/}"
+      IFACE_NAME="$(bashc.trim "$IFACE_NAME")"
+      p_debug "found interface $IFACE_ID -> $IFACE_NAME"
+    else
+      IFACE_PARAMS="$REPLY"
+    fi
+    IFACE_PARAMS=( $IFACE_PARAMS )
+    for ((n=0;n<${#IFACE_PARAMS[@]};n++)); do
+      C_PARAM="${IFACE_PARAMS[$n]}"
+      case "$C_PARAM" in
+        veth|bridge_slave|vxlan|bridge)  
+                                  SECTION="$C_PARAM"
+                                  continue;;
+        $IFACE_NAME)              continue;;
+      esac
+
+      if [ "$S_SECTION" != "" -a "$S_SECTION" != "$SECTION" ]; then
+        break
+      fi
+
+      n=$((n+1))
+      C_VALUE="${IFACE_PARAMS[$n]}"
+      # p_debug "$IFACE_NAME: $C_PARAM -> $C_VALUE"
+      if [ "$C_PARAM" == "$S_PARAM" -a "$C_VALUE" == "$2" ]; then
+        echo "$(bashc.trim "${IFACE_NAME}")"
+        RETVAL=0
+      fi
+    done
+  done <<< "$ALL_IFACES"
+  return $RETVAL
+}
+
+function exec_ns() {
+  local NS="$1"
+  shift
+  if [ "$NS" == "" ]; then
+    "$@"
+  else
+    ip netns exec "$NS" "$@"
+  fi
+}
+
+function verify_vxlan_structure() {
+  local VNI="$1"
+
+  ensure_int VNI "the VLAN network identifier is mandatory and must be integer"
+
+  local VXIFACE VXBRNAME VXNAMESPACE
+  set_vni_vars $VNI
+
+  local FOUND_VNI="$(find_iface_property -n $VXNAMESPACE $VXIFACE vxlan:id)"
+  [ $? -ne 0 ] && p_error "could not find the vxlan namespace or interfaces" && return 1
+  [ "$FOUND_VNI" != "$VNI" ] && p_error "the vxlan namespace has been modified" && return 1
+  return 0
+}

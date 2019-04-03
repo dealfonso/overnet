@@ -58,7 +58,7 @@ while bashc.parameters_next; do
     --help | -h)            usage && bashc.finalize;;
     --version|-V)           p_out "$VERSION"
                             bashc.finalize 0;;
-    createvxlan|deletevxlan|addip|removeip)                  
+    test|addiface|createvxlan|deletevxlan|addhost|rmhost)                  
                             OPERATION="$PARAM"
                             break;;
     *)                      usage && bashc.finalize 1 "invalid parameter $PARAM";;

@@ -1,0 +1,27 @@
+function bashc.read_nextparameter() {
+  local VARNAME="$1"
+  bashc.parameters_next
+  read "$VARNAME" <<< "$(bashc.parameters_current)"
+}
+
+function bashc.line_count() {
+  local n=0
+  if [ "$1" != "" ]; then
+    while read; do
+      n=$((n+1))
+    done <<< "$1"
+  fi
+  echo $n
+}
+
+function bashc.is_cidr() {
+  local CIDR="${1#*/}"
+  if ! bashc.is_int "$CIDR"; then
+    return 1
+  fi
+  local IP="${1%/*}"
+  if ! bashc.is_ip "$IP"; then
+    return 1
+  fi
+  return 0
+}
